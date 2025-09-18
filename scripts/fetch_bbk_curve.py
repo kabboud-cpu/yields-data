@@ -10,15 +10,15 @@ DL_CSV    = "https://api.statistiken.bundesbank.de/rest/download/BBSSY/{series}?
 HEAD_JSON = {"Accept":"application/vnd.sdmx.data+json;version=1.0.0", "User-Agent":"Mozilla/5.0"}
 HEAD_CSV  = {"Accept":"application/vnd.sdmx.data+csv;version=1.0.0",  "User-Agent":"Mozilla/5.0"}
 
-START = os.getenv("START_DATE", "2010-01-01")
+START = os.getenv("START_DATE", "2020-01-01")
 
 SERIES = {
-    "30Y": "BBSSY.D.REN.EUR.A640.000000WT3030.A",
-    "15Y": "BBSSY.D.REN.EUR.A615.000000WT1515.A",
-    "10Y": "BBSSY.D.REN.EUR.A630.000000WT1010.A",
-    "7Y":  "BBSSY.D.REN.EUR.A607.000000WT7070.A",
-    "5Y":  "BBSSY.D.REN.EUR.A620.000000WT0505.A",
-    "2Y":  "BBSSY.D.REN.EUR.A610.000000WT0202.A",
+    "30Y": "D.REN.EUR.A640.000000WT3030.A",
+    "15Y": "D.REN.EUR.A615.000000WT1515.A",
+    "10Y": "D.REN.EUR.A630.000000WT1010.A",
+    "7Y":  "D.REN.EUR.A607.000000WT7070.A",
+    "5Y":  "D.REN.EUR.A620.000000WT0505.A",
+    "2Y":  "D.REN.EUR.A610.000000WT0202.A",
 }
 
 def _get(url, headers, tries=3, pause=1.0):

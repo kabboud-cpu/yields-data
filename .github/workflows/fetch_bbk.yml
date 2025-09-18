@@ -1,0 +1,27 @@
+name: Fetch Germany Curve
+
+on:
+  workflow_dispatch: {}          # manual "Run workflow" button
+  schedule:
+    - cron: "8 6 * * 1-5"        # optional: weekdays 06:08 UTC
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas requests
+      - name: Run fetcher
+        run: python scripts/fetch_bbk_curve.py
+      - name: Commit CSV
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add data/de_bbk_curve.csv
+          git commit -m "Update DE curve" || echo "No changes"
+          git push

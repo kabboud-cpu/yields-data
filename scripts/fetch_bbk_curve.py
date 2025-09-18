@@ -1,114 +1,103 @@
 #!/usr/bin/env python3
-import os, sys, time, json, requests, pandas as pd
+import os, sys, io, time, json, requests, pandas as pd
 
-HEAD = {"User-Agent": "Mozilla/5.0"}
-
-# Three alternative endpoints per series (some networks/providers hiccup intermittently):
-# A) "series_ids" aggregator, B) single-series endpoint, C) editor endpoint (json)
-URLS = [
-    # A: aggregator (can take multiple, we still call one-by-one for simplicity)
-    lambda code: f"https://api.db.nomics.world/v22/series?observations=1&format=json&series_ids=BUBA/BBK01/{code}",
-    # B: direct single-series endpoint
-    lambda code: f"https://api.db.nomics.world/v22/series/BUBA/BBK01/{code}?observations=1&format=json&facets=0&offset=0",
-    # C: editor mirror (also JSON)
-    lambda code: f"https://editor.nomics.world/api/series?series_id=BUBA/BBK01/{code}"
-]
+BBK_DOWNLOAD = "https://api.statistiken.bundesbank.de/rest/download/BBK01/{code}?format=sdmx_csv"
+BBK_DATA     = "https://api.statistiken.bundesbank.de/rest/data/BBK01/{code}"
+HEAD_CSV  = {"Accept":"application/vnd.sdmx.data+csv;version=1.0.0",  "User-Agent":"Mozilla/5.0"}
+HEAD_JSON = {"Accept":"application/vnd.sdmx.data+json;version=1.0.0", "User-Agent":"Mozilla/5.0"}
 
 CODES = {
     "2Y": "WT0202",
     "5Y": "WT0505",
-    "7Y_A": "WT0707",
+    "7Y_A": "WT0707",     # try both encodings for 7Y
     "7Y_B": "WT7070",
     "10Y": "WT1010",
     "15Y": "WT1515",
     "30Y": "WT3030",
 }
 
-def _http_get(url, max_tries=3, sleep=1.5):
+def _get(url, headers, tries=3, pause=1.5):
     last = None
-    for i in range(max_tries):
+    for _ in range(tries):
         try:
-            r = requests.get(url, headers=HEAD, timeout=45)
+            r = requests.get(url, headers=headers, timeout=45)
             if r.status_code == 200 and r.text.strip():
                 return r
             last = f"HTTP {r.status_code}: {r.text[:200]}"
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
-        time.sleep(sleep)
+        time.sleep(pause)
     raise RuntimeError(last or "empty response")
 
-def _parse_series_json(js):
-    # Shape A ("series_ids"): {"series": [{"values":[["2024-01-02",2.3], ...]}]}
-    if isinstance(js, dict) and "series" in js and isinstance(js["series"], list) and js["series"]:
-        vals = js["series"][0].get("values") or []
-        rows = []
-        for v in vals:
-            if isinstance(v, (list, tuple)) and len(v) >= 2:
-                rows.append((v[0], v[1]))
-            elif isinstance(v, dict):
-                rows.append((v.get("period"), v.get("value")))
-        if rows:
-            df = pd.DataFrame(rows, columns=["Date", "value"])
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df["value"] = pd.to_numeric(df["value"], errors="coerce")
-            s = df.dropna(subset=["Date"]).set_index("Date")["value"].sort_index().astype(float)
-            return s
+def _parse_csv(text: str) -> pd.Series:
+    df = pd.read_csv(io.StringIO(text))
+    cols = {c.lower(): c for c in df.columns}
+    dcol = cols.get("time_period") or cols.get("date")
+    vcol = cols.get("obs_value")  or cols.get("value") or cols.get("close")
+    if not dcol or not vcol:
+        return pd.Series(dtype=float)
+    df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
+    df[vcol] = pd.to_numeric(df[vcol], errors="coerce")
+    s = df.dropna(subset=[dcol]).set_index(dcol)[vcol].sort_index()
+    return s.astype(float)
 
-    # Shape C (editor API): {"series":{"values":[["2024-01-02",2.3], ...]}}
-    if isinstance(js, dict) and "series" in js and isinstance(js["series"], dict):
-        vals = js["series"].get("values") or []
-        rows = []
-        for v in vals:
-            if isinstance(v, (list, tuple)) and len(v) >= 2:
-                rows.append((v[0], v[1]))
-            elif isinstance(v, dict):
-                rows.append((v.get("period"), v.get("value")))
-        if rows:
-            df = pd.DataFrame(rows, columns=["Date", "value"])
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-            df["value"] = pd.to_numeric(df["value"], errors="coerce")
-            s = df.dropna(subset=["Date"]).set_index("Date")["value"].sort_index().astype(float)
-            return s
-
-    return pd.Series(dtype=float)
+def _parse_json(text: str) -> pd.Series:
+    js = json.loads(text)
+    ds = js.get("dataSets", [{}])[0]
+    series = ds.get("series", {})
+    if not series:
+        return pd.Series(dtype=float)
+    key = next(iter(series))
+    obs = series[key].get("observations", {})
+    times = js["structure"]["dimensions"]["observation"][0]["values"]
+    dates = [pd.to_datetime(t["id"], errors="coerce") for t in times]
+    s = pd.Series({dates[int(k)]: v[0] for k, v in obs.items()}, dtype=float).dropna().sort_index()
+    return s
 
 def fetch_series(code: str) -> pd.Series:
-    errors = []
-    for make in URLS:
-        url = make(code)
-        try:
-            r = _http_get(url)
-            try:
-                js = r.json()
-            except Exception:
-                # Some endpoints might send JSON with text/plain; attempt json load
-                js = json.loads(r.text)
-            s = _parse_series_json(js)
-            if not s.empty:
-                print(f"[OK] {code} via {url}")
-                return s
-            else:
-                errors.append(f"empty via {url}")
-        except Exception as e:
-            errors.append(f"{url} -> {e}")
-    print("[ERR] " + " | ".join(errors), file=sys.stderr)
+    # 1) try the simpler download CSV endpoint
+    try:
+        r = _get(BBK_DOWNLOAD.format(code=code), HEAD_CSV)
+        s = _parse_csv(r.text)
+        if not s.empty:
+            print(f"[OK CSV] {code} ({len(s)} pts)")
+            return s
+        else:
+            print(f"[CSV empty] {code}", file=sys.stderr)
+    except Exception as e:
+        print(f"[CSV fail] {code}: {e}", file=sys.stderr)
+
+    # 2) fallback: SDMX-JSON endpoint
+    try:
+        r = _get(BBK_DATA.format(code=code), HEAD_JSON)
+        s = _parse_json(r.text)
+        if not s.empty:
+            print(f"[OK JSON] {code} ({len(s)} pts)")
+            return s
+        else:
+            print(f"[JSON empty] {code}", file=sys.stderr)
+    except Exception as e:
+        print(f"[JSON fail] {code}: {e}", file=sys.stderr)
+
     return pd.Series(dtype=float)
 
 def main():
     got = {}
 
-    # Anchor 10Y first
+    # Anchor 10Y first; stop if empty
     s10 = fetch_series(CODES["10Y"])
     if s10.empty:
-        print("ERROR: 10Y WT1010 empty across all endpoints", file=sys.stderr)
+        print("ERROR: 10Y WT1010 empty across CSV+JSON endpoints", file=sys.stderr)
         sys.exit(2)
     got["10Y"] = s10
 
+    # Other key points
     for lbl, code in [("2Y","WT0202"),("5Y","WT0505"),("15Y","WT1515"),("30Y","WT3030")]:
         s = fetch_series(code)
         if not s.empty:
             got[lbl] = s
 
+    # 7Y: choose the variant with more points
     s7a, s7b = fetch_series(CODES["7Y_A"]), fetch_series(CODES["7Y_B"])
     if s7a.size or s7b.size:
         got["7Y"] = s7a if s7a.size >= s7b.size else s7b

@@ -1,9 +1,9 @@
 name: Fetch Germany Curve
 
 on:
-  workflow_dispatch: {}          # manual "Run workflow" button
+  workflow_dispatch: {}
   schedule:
-    - cron: "8 6 * * 1-5"        # optional: weekdays 06:08 UTC
+    - cron: "8 6 * * 1-5"
 
 jobs:
   run:
@@ -12,16 +12,36 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - run: pip install pandas requests
-      - name: Run fetcher
-        run: python scripts/fetch_bbk_curve.py
-      - name: Commit CSV
+
+      - name: Run fetcher (with debug)
+        id: fetch
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add data/de_bbk_curve.csv
-          git commit -m "Update DE curve" || echo "No changes"
-          git push
+          set -e
+          python scripts/fetch_bbk_curve.py | tee run.log
+
+      - name: Upload debug log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetch-log
+          path: |
+            run.log
+            data/de_bbk_curve.csv
+
+      - name: Commit CSV (if created)
+        run: |
+          if [ -f data/de_bbk_curve.csv ]; then
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add data/de_bbk_curve.csv
+            git commit -m "Update DE curve" || echo "No changes"
+            git push
+          else
+            echo "No CSV generated."
+          fi

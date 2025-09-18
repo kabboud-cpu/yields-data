@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 import os, sys, io, time, json, requests, pandas as pd
 
-# We’ll try JSON first (with an explicit time window), then two CSV variants.
-BBK_DATA     = "https://api.statistiken.bundesbank.de/rest/data/BBK01/{code}?startPeriod={start}"
-BBK_DL_HYPH  = "https://api.statistiken.bundesbank.de/rest/download/BBK01/{code}?format=sdmx-csv&startPeriod={start}"
-BBK_DL_UND   = "https://api.statistiken.bundesbank.de/rest/download/BBK01/{code}?format=sdmx_csv&startPeriod={start}"
+# Use the correct dataflow (BBSSY) + full series keys from Bundesbank
+# We'll try JSON first, then CSV (hyphen spelling). We pass startPeriod to avoid empty responses.
+
+DATA_JSON = "https://api.statistiken.bundesbank.de/rest/data/BBSSY/{series}?startPeriod={start}"
+DL_CSV    = "https://api.statistiken.bundesbank.de/rest/download/BBSSY/{series}?format=sdmx-csv&startPeriod={start}"
 
 HEAD_JSON = {"Accept":"application/vnd.sdmx.data+json;version=1.0.0", "User-Agent":"Mozilla/5.0"}
 HEAD_CSV  = {"Accept":"application/vnd.sdmx.data+csv;version=1.0.0",  "User-Agent":"Mozilla/5.0"}
 
-START = os.getenv("START_DATE", "2020-01-01")
+START = os.getenv("START_DATE", "2010-01-01")
 
-CODES = {
-    "2Y": "WT0202",
-    "5Y": "WT0505",
-    "7Y_A": "WT0707",
-    "7Y_B": "WT7070",
-    "10Y": "WT1010",
-    "15Y": "WT1515",
-    "30Y": "WT3030",
+SERIES = {
+    "30Y": "BBSSY.D.REN.EUR.A640.000000WT3030.A",
+    "15Y": "BBSSY.D.REN.EUR.A615.000000WT1515.A",
+    "10Y": "BBSSY.D.REN.EUR.A630.000000WT1010.A",
+    "7Y":  "BBSSY.D.REN.EUR.A607.000000WT7070.A",
+    "5Y":  "BBSSY.D.REN.EUR.A620.000000WT0505.A",
+    "2Y":  "BBSSY.D.REN.EUR.A610.000000WT0202.A",
 }
 
-def _get(url, headers, tries=3, pause=1.2):
+def _get(url, headers, tries=3, pause=1.0):
     last = None
     for _ in range(tries):
         try:
@@ -58,63 +58,48 @@ def _parse_csv(text: str) -> pd.Series:
     df[vcol] = pd.to_numeric(df[vcol], errors="coerce")
     return df.dropna(subset=[dcol]).set_index(dcol)[vcol].sort_index().astype(float)
 
-def fetch_series(code: str) -> pd.Series:
-    # 1) JSON (preferred) with startPeriod
+def fetch(series_key: str) -> pd.Series:
+    # JSON first
     try:
-        r = _get(BBK_DATA.format(code=code, start=START), HEAD_JSON)
+        r = _get(DATA_JSON.format(series=series_key, start=START), HEAD_JSON)
         s = _parse_json(r.text)
         if not s.empty:
-            print(f"[OK JSON] {code} ({len(s)} pts)")
+            print(f"[OK JSON] {series_key} ({len(s)} pts)")
             return s
         else:
-            print(f"[JSON empty] {code}", file=sys.stderr)
+            print(f"[JSON empty] {series_key}", file=sys.stderr)
     except Exception as e:
-        print(f"[JSON fail] {code}: {e}", file=sys.stderr)
+        print(f"[JSON fail] {series_key}: {e}", file=sys.stderr)
 
-    # 2) CSV with hyphen spelling
+    # CSV fallback
     try:
-        r = _get(BBK_DL_HYPH.format(code=code, start=START), HEAD_CSV)
+        r = _get(DL_CSV.format(series=series_key, start=START), HEAD_CSV)
         s = _parse_csv(r.text)
         if not s.empty:
-            print(f"[OK CSV hyphen] {code} ({len(s)} pts)")
+            print(f"[OK CSV] {series_key} ({len(s)} pts)")
             return s
         else:
-            print(f"[CSV hyphen empty] {code}", file=sys.stderr)
+            print(f"[CSV empty] {series_key}", file=sys.stderr)
     except Exception as e:
-        print(f"[CSV hyphen fail] {code}: {e}", file=sys.stderr)
-
-    # 3) CSV with underscore spelling (some mirrors accept this)
-    try:
-        r = _get(BBK_DL_UND.format(code=code, start=START), HEAD_CSV)
-        s = _parse_csv(r.text)
-        if not s.empty:
-            print(f"[OK CSV underscore] {code} ({len(s)} pts)")
-            return s
-        else:
-            print(f"[CSV underscore empty] {code}", file=sys.stderr)
-    except Exception as e:
-        print(f"[CSV underscore fail] {code}: {e}", file=sys.stderr)
+        print(f"[CSV fail] {series_key}: {e}", file=sys.stderr)
 
     return pd.Series(dtype=float)
 
 def main():
     got = {}
 
-    # Anchor 10Y first; stop if empty so we don’t commit partials
-    s10 = fetch_series(CODES["10Y"])
+    # Anchor (10Y) first
+    s10 = fetch(SERIES["10Y"])
     if s10.empty:
-        print("ERROR: 10Y WT1010 still empty after JSON+CSV variants", file=sys.stderr)
+        print("ERROR: 10Y empty via BBSSY endpoints", file=sys.stderr)
         sys.exit(2)
     got["10Y"] = s10
 
-    for lbl, code in [("2Y","WT0202"),("5Y","WT0505"),("15Y","WT1515"),("30Y","WT3030")]:
-        s = fetch_series(code)
+    # Others
+    for lbl in ["2Y","5Y","7Y","15Y","30Y"]:
+        s = fetch(SERIES[lbl])
         if not s.empty:
             got[lbl] = s
-
-    s7a, s7b = fetch_series(CODES["7Y_A"]), fetch_series(CODES["7Y_B"])
-    if s7a.size or s7b.size:
-        got["7Y"] = s7a if s7a.size >= s7b.size else s7b
 
     if not got:
         print("ERROR: no series fetched", file=sys.stderr)
